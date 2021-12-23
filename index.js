@@ -1,61 +1,142 @@
-// We import expres
-const express = require("express");
-
-// We store all express methods in a variable called app
+const connection = require('./db-config');
+const { setupRoutes } = require('./routes');
+const express = require('express');
 const app = express();
+const Joi = require('joi');
 
-// We store the port we want to use in a variable
-const port = 3000;
+const port = process.env.PORT || 3002;
 
-// We create a get route for '/'
-app.get("/", (request, response) => {
-  // We send "Welcome to Express as a response"
-  response.send("Welcome to Express");
-});
-
-// We create a route '/user/:name'
-app.get("/users/:name", (request, response) => {
-  // We send "Welcome and the name passed in url after users/"
-  response.send(`Welcome, ${request.params.name}`);
-});
-
-const fruits = ["Apple", "Banana", "Kiwi"];
-
-// We create a route for '/fruits'
-app.get("/fruits", (request, response) => {
-  // We check if there is a fruit in our array match with the name query
-  // Ex: localhost:3000/fruits?name=Banana
-  if (fruits.includes(request.query.name)) {
-    // if the ressource is found, we send back the name
-    response.send(`Here is your ${request.query.name}`);
+connection.connect((err) => {
+  if (err) {
+    console.error('error connecting: ' + err.stack);
   } else {
-    // if not we send a sorry message
-    response.send(`Sorry, ${request.query.name} not found...`);
+    console.log('connected as id ' + connection.threadId);
   }
 });
 
-const cocktails = [
-  {
-    id: 0,
-    name: "Margarita",
-  },
-  {
-    id: 1,
-    name: "Mojito",
-  },
-  {
-    id: 2,
-    name: "Cuba Libre",
-  },
-];
+app.use(express.json());
 
-// We create a route for '/cocktails'
-app.get("/cocktails", (request, response) => {
-  // we send back a 200 status and the cocktail in a JSON format
-  response.status(200).json(cocktails);
+setupRoutes(app);
+
+// TODO break the following routes handlers into model and controller
+app.get('/api/users', (req, res) => {
+  let sql = 'SELECT * FROM users';
+  const sqlValues = [];
+  if (req.query.language) {
+    sql += ' WHERE language = ?';
+    sqlValues.push(req.query.language);
+  }
+  connection.query(sql, sqlValues, (err, results) => {
+    if (err) {
+      res.status(500).send('Error retrieving users from database');
+    } else {
+      res.json(results);
+    }
+  });
 });
 
-// We listen to incoming request on port
+app.get('/api/users/:id', (req, res) => {
+  const userId = req.params.id;
+  connection.query(
+    'SELECT * FROM users WHERE id = ?',
+    [userId],
+    (err, results) => {
+      if (err) {
+        res.status(500).send('Error retrieving user from database');
+      } else {
+        if (results.length) res.json(results[0]);
+        else res.status(404).send('User not found');
+      }
+    }
+  );
+});
+
+app.post('/api/users', (req, res) => {
+  const { email } = req.body;
+  const db = connection.promise();
+  let validationErrors = null;
+  db.query('SELECT * FROM users WHERE email = ?', [email])
+    .then(([result]) => {
+      if (result[0]) return Promise.reject('DUPLICATE_EMAIL');
+      validationErrors = Joi.object({
+        email: Joi.string().email().max(255).required(),
+        firstname: Joi.string().max(255).required(),
+        lastname: Joi.string().max(255).required(),
+        city: Joi.string().allow(null, '').max(255),
+        language: Joi.string().allow(null, '').max(255),
+      }).validate(req.body, { abortEarly: false }).error;
+      if (validationErrors) return Promise.reject('INVALID_DATA');
+      return db.query('INSERT INTO users SET ?', [req.body]);
+    })
+    .then(([{ insertId }]) => {
+      res.status(201).json({ id: insertId, ...req.body });
+    })
+    .catch((err) => {
+      console.error(err);
+      if (err === 'DUPLICATE_EMAIL')
+        res.status(409).json({ message: 'This email is already used' });
+      else if (err === 'INVALID_DATA')
+        res.status(422).json({ validationErrors });
+      else res.status(500).send('Error saving the user');
+    });
+});
+
+app.put('/api/users/:id', (req, res) => {
+  const userId = req.params.id;
+  const db = connection.promise();
+  let existingUser = null;
+  let validationErrors = null;
+  Promise.all([
+    db.query('SELECT * FROM users WHERE id = ?', [userId]),
+    db.query('SELECT * FROM users WHERE email = ? AND id <> ?', [
+      req.body.email,
+      userId,
+    ]),
+  ])
+    .then(([[[existingUser]], [[otherUserWithEmail]]]) => {
+      if (!existingUser) return Promise.reject('RECORD_NOT_FOUND');
+      if (otherUserWithEmail) return Promise.reject('DUPLICATE_EMAIL');
+      validationErrors = Joi.object({
+        email: Joi.string().email().max(255),
+        firstname: Joi.string().min(1).max(255),
+        lastname: Joi.string().min(1).max(255),
+        city: Joi.string().allow(null, '').max(255),
+        language: Joi.string().allow(null, '').max(255),
+      }).validate(req.body, { abortEarly: false }).error;
+      if (validationErrors) return Promise.reject('INVALID_DATA');
+      return db.query('UPDATE users SET ? WHERE id = ?', [req.body, userId]);
+    })
+    .then(() => {
+      res.status(200).json({ ...existingUser, ...req.body });
+    })
+    .catch((err) => {
+      console.error(err);
+      if (err === 'RECORD_NOT_FOUND')
+        res.status(404).send(`User with id ${userId} not found.`);
+      if (err === 'DUPLICATE_EMAIL')
+        res.status(409).json({ message: 'This email is already used' });
+      else if (err === 'INVALID_DATA')
+        res.status(422).json({ validationErrors });
+      else res.status(500).send('Error updating a user');
+    });
+});
+
+app.delete('/api/users/:id', (req, res) => {
+  connection.query(
+    'DELETE FROM users WHERE id = ?',
+    [req.params.id],
+    (err, result) => {
+      if (err) {
+        console.log(err);
+        res.status(500).send('Error deleting an user');
+      } else {
+        if (result.affectedRows) res.status(200).send('🎉 User deleted!');
+        else res.status(404).send('User not found.');
+      }
+    }
+  );
+});
+
 app.listen(port, () => {
-  console.log(`Server is runing on ${port}`);
+  console.log(`Server listening on port ${port}`);
 });
