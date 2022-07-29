@@ -2,7 +2,7 @@ const connection = require('./db-config');
 const { setupRoutes } = require('./routes');
 const express = require('express');
 const app = express();
-const Joi = require('joi');
+//const Joi = require('joi');
 
 const port = process.env.PORT || 3002;
 

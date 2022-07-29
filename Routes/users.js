@@ -1,6 +1,8 @@
 const usersRouter = require('express').Router();
 const User = require('../models/user');
 
+//import Joi from 'joi.js';
+
 const connection = require('../db-config');
 
 usersRouter.get('/', (req, res) => {
